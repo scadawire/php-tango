@@ -18,6 +18,7 @@
 
 #include <string>
 #include <vector>
+#include <deque>
 
 /* cppTango (pure C++) is included first, before the PHP/Zend C headers.
  * config.m4 sets up a private shim include dir so that <tango/...> always
@@ -243,25 +244,89 @@ static void deviceattribute_to_zval(Tango::DeviceAttribute &da, zval *return_val
         }
     }
 
-    /* spectrum / image -> flat PHP array (row-major for images) */
-    array_init(return_value);
+    /* spectrum -> flat PHP array; image -> array of rows (row-major). */
+    zval flat;
+    array_init(&flat);
+    bool ok = true;
     switch (t) {
-        case Tango::DEV_BOOLEAN: { std::vector<bool> v; da.extract_read(v); php_array_from_bools(return_value, v); return; }
-        case Tango::DEV_SHORT:   { std::vector<short> v; da.extract_read(v); php_array_from_ints(return_value, v); return; }
-        case Tango::DEV_USHORT:  { std::vector<unsigned short> v; da.extract_read(v); php_array_from_ints(return_value, v); return; }
-        case Tango::DEV_UCHAR:   { std::vector<unsigned char> v; da.extract_read(v); php_array_from_ints(return_value, v); return; }
-        case Tango::DEV_LONG:    { std::vector<Tango::DevLong> v; da.extract_read(v); php_array_from_ints(return_value, v); return; }
-        case Tango::DEV_ULONG:   { std::vector<Tango::DevULong> v; da.extract_read(v); php_array_from_ints(return_value, v); return; }
-        case Tango::DEV_LONG64:  { std::vector<Tango::DevLong64> v; da.extract_read(v); php_array_from_ints(return_value, v); return; }
-        case Tango::DEV_ULONG64: { std::vector<Tango::DevULong64> v; da.extract_read(v); php_array_from_ints(return_value, v); return; }
-        case Tango::DEV_FLOAT:   { std::vector<float> v; da.extract_read(v); php_array_from_doubles(return_value, v); return; }
-        case Tango::DEV_DOUBLE:  { std::vector<double> v; da.extract_read(v); php_array_from_doubles(return_value, v); return; }
-        case Tango::DEV_STRING:  { std::vector<std::string> v; da.extract_read(v); php_array_from_strings(return_value, v); return; }
-        case Tango::DEV_STATE:   { std::vector<Tango::DevState> v; da.extract_read(v); php_array_from_states(return_value, v); return; }
-        default:
-            zend_throw_exception(tango_devfailed_ce,
-                "Unsupported Tango array attribute data type", 0);
-            return;
+        case Tango::DEV_BOOLEAN: { std::vector<bool> v; da.extract_read(v); php_array_from_bools(&flat, v); break; }
+        case Tango::DEV_SHORT:   { std::vector<short> v; da.extract_read(v); php_array_from_ints(&flat, v); break; }
+        case Tango::DEV_USHORT:  { std::vector<unsigned short> v; da.extract_read(v); php_array_from_ints(&flat, v); break; }
+        case Tango::DEV_UCHAR:   { std::vector<unsigned char> v; da.extract_read(v); php_array_from_ints(&flat, v); break; }
+        case Tango::DEV_LONG:    { std::vector<Tango::DevLong> v; da.extract_read(v); php_array_from_ints(&flat, v); break; }
+        case Tango::DEV_ULONG:   { std::vector<Tango::DevULong> v; da.extract_read(v); php_array_from_ints(&flat, v); break; }
+        case Tango::DEV_LONG64:  { std::vector<Tango::DevLong64> v; da.extract_read(v); php_array_from_ints(&flat, v); break; }
+        case Tango::DEV_ULONG64: { std::vector<Tango::DevULong64> v; da.extract_read(v); php_array_from_ints(&flat, v); break; }
+        case Tango::DEV_FLOAT:   { std::vector<float> v; da.extract_read(v); php_array_from_doubles(&flat, v); break; }
+        case Tango::DEV_DOUBLE:  { std::vector<double> v; da.extract_read(v); php_array_from_doubles(&flat, v); break; }
+        case Tango::DEV_STRING:  { std::vector<std::string> v; da.extract_read(v); php_array_from_strings(&flat, v); break; }
+        case Tango::DEV_STATE:   { std::vector<Tango::DevState> v; da.extract_read(v); php_array_from_states(&flat, v); break; }
+        default: ok = false; break;
+    }
+    if (!ok) {
+        zval_ptr_dtor(&flat);
+        zend_throw_exception(tango_devfailed_ce,
+            "Unsupported Tango array attribute data type", 0);
+        RETVAL_NULL();
+        return;
+    }
+
+    if (fmt == Tango::IMAGE && da.get_dim_y() > 0) {
+        /* reshape the flat row-major buffer into an array of dim_y rows. */
+        long dx = da.get_dim_x();
+        long dy = da.get_dim_y();
+        array_init(return_value);
+        HashTable *fh = Z_ARRVAL(flat);
+        for (long r = 0; r < dy; ++r) {
+            zval row;
+            array_init(&row);
+            for (long c = 0; c < dx; ++c) {
+                zval *el = zend_hash_index_find(fh, (zend_ulong)(r * dx + c));
+                if (el) {
+                    Z_TRY_ADDREF_P(el);
+                    add_next_index_zval(&row, el);
+                }
+            }
+            add_next_index_zval(return_value, &row);
+        }
+        zval_ptr_dtor(&flat);
+    } else {
+        ZVAL_COPY_VALUE(return_value, &flat);
+    }
+}
+
+/* Convert a Tango pipe blob to a PHP associative array (element name => value).
+ * Nested blobs recurse. */
+static void pipeblob_to_zval(Tango::DevicePipeBlob &blob, zval *out)
+{
+    array_init(out);
+    size_t n = blob.get_data_elt_nb();
+    for (size_t i = 0; i < n; ++i) {
+        std::string name = blob.get_data_elt_name(i);
+        int type = blob.get_data_elt_type(i);
+        zval v;
+        switch (type) {
+            case Tango::DEV_BOOLEAN: { Tango::DevBoolean x = 0; blob >> x; ZVAL_BOOL(&v, x); break; }
+            case Tango::DEV_SHORT:   { short x = 0; blob >> x; ZVAL_LONG(&v, x); break; }
+            case Tango::DEV_USHORT:  { Tango::DevUShort x = 0; blob >> x; ZVAL_LONG(&v, x); break; }
+            case Tango::DEV_LONG:    { Tango::DevLong x = 0; blob >> x; ZVAL_LONG(&v, x); break; }
+            case Tango::DEV_ULONG:   { Tango::DevULong x = 0; blob >> x; ZVAL_LONG(&v, (zend_long) x); break; }
+            case Tango::DEV_LONG64:  { Tango::DevLong64 x = 0; blob >> x; ZVAL_LONG(&v, (zend_long) x); break; }
+            case Tango::DEV_ULONG64: { Tango::DevULong64 x = 0; blob >> x; ZVAL_LONG(&v, (zend_long) x); break; }
+            case Tango::DEV_FLOAT:   { float x = 0; blob >> x; ZVAL_DOUBLE(&v, x); break; }
+            case Tango::DEV_DOUBLE:  { double x = 0; blob >> x; ZVAL_DOUBLE(&v, x); break; }
+            case Tango::DEV_STRING:  { std::string x; blob >> x; ZVAL_STRINGL(&v, x.c_str(), x.size()); break; }
+            case Tango::DEV_STATE:   { Tango::DevState x; blob >> x; ZVAL_STRING(&v, tango_state_name(x)); break; }
+            case Tango::DEVVAR_SHORTARRAY:  { std::vector<short> x; blob >> x; array_init(&v); php_array_from_ints(&v, x); break; }
+            case Tango::DEVVAR_LONGARRAY:   { std::vector<Tango::DevLong> x; blob >> x; array_init(&v); php_array_from_ints(&v, x); break; }
+            case Tango::DEVVAR_LONG64ARRAY: { std::vector<Tango::DevLong64> x; blob >> x; array_init(&v); php_array_from_ints(&v, x); break; }
+            case Tango::DEVVAR_FLOATARRAY:  { std::vector<float> x; blob >> x; array_init(&v); php_array_from_doubles(&v, x); break; }
+            case Tango::DEVVAR_DOUBLEARRAY: { std::vector<double> x; blob >> x; array_init(&v); php_array_from_doubles(&v, x); break; }
+            case Tango::DEVVAR_STRINGARRAY: { std::vector<std::string> x; blob >> x; array_init(&v); php_array_from_strings(&v, x); break; }
+            case Tango::DEV_PIPE_BLOB:      { Tango::DevicePipeBlob nb; blob >> nb; pipeblob_to_zval(nb, &v); break; }
+            default: ZVAL_NULL(&v); break;
+        }
+        add_assoc_zval_ex(out, name.c_str(), name.size(), &v);
     }
 }
 
@@ -438,6 +503,17 @@ ZEND_END_ARG_INFO()
 ZEND_BEGIN_ARG_INFO_EX(arginfo_set, 0, 0, 2)
     ZEND_ARG_TYPE_INFO(0, name, IS_STRING, 0)
     ZEND_ARG_INFO(0, value)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_subscribe, 0, 0, 2)
+    ZEND_ARG_TYPE_INFO(0, attr, IS_STRING, 0)
+    ZEND_ARG_TYPE_INFO(0, eventType, IS_LONG, 0)
+    ZEND_ARG_TYPE_INFO(0, queueSize, IS_LONG, 0)
+    ZEND_ARG_TYPE_INFO(0, stateless, _IS_BOOL, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_event_id, 0, 0, 1)
+    ZEND_ARG_TYPE_INFO(0, eventId, IS_LONG, 0)
 ZEND_END_ARG_INFO()
 
 /* ------------------------------------------------------------------------- */
@@ -704,6 +780,111 @@ PHP_METHOD(DeviceProxy, get_timeout_millis)
     } catch (Tango::DevFailed &e) { throw_tango_devfailed(e); RETURN_THROWS(); }
 }
 
+/* read_pipe(string $name): array  -> ['name' => rootBlobName, 'data' => {...}] */
+PHP_METHOD(DeviceProxy, read_pipe)
+{
+    char *name; size_t name_len;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STRING(name, name_len)
+    ZEND_PARSE_PARAMETERS_END();
+
+    Tango::DeviceProxy *dev = tango_get_proxy(getThis());
+    if (!dev) RETURN_THROWS();
+    try {
+        std::string pn(name, name_len);
+        Tango::DevicePipe dp = dev->read_pipe(pn);
+        Tango::DevicePipeBlob &root = dp.get_root_blob();
+        array_init(return_value);
+        std::string bn = root.get_name();
+        add_assoc_stringl(return_value, "name", (char *) bn.c_str(), bn.size());
+        zval data;
+        pipeblob_to_zval(root, &data);
+        add_assoc_zval(return_value, "data", &data);
+    } catch (Tango::DevFailed &e) { throw_tango_devfailed(e); RETURN_THROWS(); }
+}
+
+/* subscribe_event(string $attr, int $eventType, int $queueSize = 100,
+ *                 bool $stateless = true): int   (pull model; returns event id) */
+PHP_METHOD(DeviceProxy, subscribe_event)
+{
+    char *attr; size_t attr_len;
+    zend_long type;
+    zend_long qsize = 100;
+    bool stateless = 1;
+    ZEND_PARSE_PARAMETERS_START(2, 4)
+        Z_PARAM_STRING(attr, attr_len)
+        Z_PARAM_LONG(type)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_LONG(qsize)
+        Z_PARAM_BOOL(stateless)
+    ZEND_PARSE_PARAMETERS_END();
+
+    Tango::DeviceProxy *dev = tango_get_proxy(getThis());
+    if (!dev) RETURN_THROWS();
+    try {
+        int id = dev->subscribe_event(std::string(attr, attr_len),
+                                      (Tango::EventType) type, (int) qsize, stateless);
+        RETURN_LONG(id);
+    } catch (Tango::DevFailed &e) { throw_tango_devfailed(e); RETURN_THROWS(); }
+}
+
+/* get_events(int $eventId): array  -- pull buffered events. Each element is
+ * ['attr_name'=>.., 'event'=>.., 'err'=>bool, 'value'=>mixed|null, 'error'=>?]. */
+PHP_METHOD(DeviceProxy, get_events)
+{
+    zend_long id;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_LONG(id)
+    ZEND_PARSE_PARAMETERS_END();
+
+    Tango::DeviceProxy *dev = tango_get_proxy(getThis());
+    if (!dev) RETURN_THROWS();
+    try {
+        Tango::EventDataList events;
+        dev->get_events((int) id, events);
+        array_init(return_value);
+        for (auto *e : events) {
+            zval ev;
+            array_init(&ev);
+            add_assoc_stringl(&ev, "attr_name", (char *) e->attr_name.c_str(), e->attr_name.size());
+            add_assoc_stringl(&ev, "event", (char *) e->event.c_str(), e->event.size());
+            add_assoc_bool(&ev, "err", e->err ? 1 : 0);
+            if (e->err) {
+                std::string msg;
+                for (CORBA::ULong i = 0; i < e->errors.length(); ++i) {
+                    if (i) msg += "\n";
+                    msg += (const char *) e->errors[i].desc;
+                }
+                add_assoc_stringl(&ev, "error", (char *) msg.c_str(), msg.size());
+                add_assoc_null(&ev, "value");
+            } else if (e->attr_value) {
+                zval val;
+                deviceattribute_to_zval(*e->attr_value, &val);
+                if (EG(exception)) { zend_clear_exception(); ZVAL_NULL(&val); }
+                add_assoc_zval(&ev, "value", &val);
+            } else {
+                add_assoc_null(&ev, "value");
+            }
+            add_next_index_zval(return_value, &ev);
+        }
+    } catch (Tango::DevFailed &e) { throw_tango_devfailed(e); RETURN_THROWS(); }
+}
+
+/* unsubscribe_event(int $eventId): void */
+PHP_METHOD(DeviceProxy, unsubscribe_event)
+{
+    zend_long id;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_LONG(id)
+    ZEND_PARSE_PARAMETERS_END();
+
+    Tango::DeviceProxy *dev = tango_get_proxy(getThis());
+    if (!dev) RETURN_THROWS();
+    try {
+        dev->unsubscribe_event((int) id);
+    } catch (Tango::DevFailed &e) { throw_tango_devfailed(e); RETURN_THROWS(); }
+}
+
 /* PyTango-style attribute access: $dev->voltage and $dev->voltage = 5 */
 PHP_METHOD(DeviceProxy, __get)
 {
@@ -757,6 +938,10 @@ static const zend_function_entry tango_deviceproxy_methods[] = {
     PHP_ME(DeviceProxy, command_inout,      arginfo_command,     ZEND_ACC_PUBLIC)
     PHP_ME(DeviceProxy, set_timeout_millis, arginfo_set_timeout, ZEND_ACC_PUBLIC)
     PHP_ME(DeviceProxy, get_timeout_millis, arginfo_none,        ZEND_ACC_PUBLIC)
+    PHP_ME(DeviceProxy, read_pipe,          arginfo_name_only,   ZEND_ACC_PUBLIC)
+    PHP_ME(DeviceProxy, subscribe_event,    arginfo_subscribe,   ZEND_ACC_PUBLIC)
+    PHP_ME(DeviceProxy, get_events,         arginfo_event_id,    ZEND_ACC_PUBLIC)
+    PHP_ME(DeviceProxy, unsubscribe_event,  arginfo_event_id,    ZEND_ACC_PUBLIC)
     PHP_ME(DeviceProxy, __get,              arginfo_get,         ZEND_ACC_PUBLIC)
     PHP_ME(DeviceProxy, __set,              arginfo_set,         ZEND_ACC_PUBLIC)
     PHP_FE_END
@@ -782,19 +967,24 @@ struct AttrSpec {
     std::string name;
     long data_type;                 /* CmdArgType */
     Tango::AttrWriteType w_type;
-    Tango::AttrDataFormat format;    /* SCALAR or SPECTRUM */
+    Tango::AttrDataFormat format;    /* SCALAR, SPECTRUM or IMAGE */
     long max_x;
+    long max_y;
 };
 struct CmdSpec {
     std::string name;
     long in_type;
     long out_type;
 };
+struct PipeSpec {
+    std::string name;
+};
 struct ServerReg {
     std::string class_name;
     zend_class_entry *php_ce;        /* the user's PHP device class */
     std::vector<AttrSpec> attrs;
     std::vector<CmdSpec> cmds;
+    std::vector<PipeSpec> pipes;
 };
 
 /* The single active server registration (a process hosts one PHP server). */
@@ -995,8 +1185,50 @@ static void set_attr_spectrum(Tango::Attribute &att, zval *arr, ConvFn conv)
     att.set_value(p, n, 0, true);
 }
 
+/* Set an image (2D) attribute value from a PHP array of rows (row-major). */
+template <typename T, typename ConvFn>
+static void set_attr_image(Tango::Attribute &att, zval *rows, ConvFn conv)
+{
+    HashTable *rh = Z_ARRVAL_P(rows);
+    long dy = (long) zend_hash_num_elements(rh);
+    long dx = 0;
+    zval *row;
+    ZEND_HASH_FOREACH_VAL(rh, row) {   /* x dimension = width of first row */
+        if (Z_TYPE_P(row) == IS_ARRAY) { dx = (long) zend_hash_num_elements(Z_ARRVAL_P(row)); }
+        break;
+    } ZEND_HASH_FOREACH_END();
+
+    T *p = new T[(dx * dy) > 0 ? (dx * dy) : 1];
+    long i = 0;
+    ZEND_HASH_FOREACH_VAL(rh, row) {
+        if (Z_TYPE_P(row) == IS_ARRAY) {
+            zval *e;
+            ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(row), e) { p[i++] = conv(e); } ZEND_HASH_FOREACH_END();
+        }
+    } ZEND_HASH_FOREACH_END();
+    att.set_value(p, dx, dy, true);
+}
+
 static void zval_into_attribute(Tango::Attribute &att, const AttrSpec &spec, zval *v)
 {
+    if (spec.format == Tango::IMAGE) {
+        if (Z_TYPE_P(v) != IS_ARRAY) {
+            Tango::Except::throw_exception(std::string("PHP_WrongType"),
+                std::string("Image attribute handler must return an array of rows: ") + spec.name,
+                std::string("PhpAttr::read"));
+        }
+        switch (spec.data_type) {
+            case Tango::DEV_DOUBLE:
+                set_attr_image<Tango::DevDouble>(att, v, [](zval *e){ return (Tango::DevDouble) zval_get_double(e); }); return;
+            case Tango::DEV_LONG:
+                set_attr_image<Tango::DevLong>(att, v, [](zval *e){ return (Tango::DevLong) zval_get_long(e); }); return;
+            default:
+                Tango::Except::throw_exception(std::string("PHP_UnsupportedType"),
+                    std::string("Unsupported image data type for ") + spec.name,
+                    std::string("PhpAttr::read"));
+        }
+    }
+
     if (spec.format == Tango::SPECTRUM) {
         if (Z_TYPE_P(v) != IS_ARRAY) {
             Tango::Except::throw_exception(std::string("PHP_WrongType"),
@@ -1149,6 +1381,38 @@ public:
     bool is_allowed(Tango::DeviceImpl *, Tango::AttReqType) override { return true; }
 };
 
+class PhpImageAttr : public Tango::ImageAttr
+{
+public:
+    AttrSpec spec;
+    PhpImageAttr(const AttrSpec &s)
+        : Tango::ImageAttr(s.name.c_str(), s.data_type, s.w_type, s.max_x, s.max_y), spec(s) {}
+
+    void read(Tango::DeviceImpl *dev, Tango::Attribute &att) override
+    {
+        zend_object *obj = php_obj_of(dev);
+        std::string method = "read_" + spec.name;
+        zval retval;
+        php_call_method(obj, method.c_str(), 0, nullptr, &retval, method.c_str());
+        zval_into_attribute(att, spec, &retval);
+        zval_ptr_dtor(&retval);
+    }
+
+    bool is_allowed(Tango::DeviceImpl *, Tango::AttReqType) override { return true; }
+};
+
+/* Server-side pipe: read handler calls the PHP read_<pipe>() method, which
+ * returns an associative array (element name => value) used to fill the blob. */
+class PhpPipe : public Tango::Pipe
+{
+public:
+    PipeSpec spec;
+    PhpPipe(const PipeSpec &s)
+        : Tango::Pipe(s.name, Tango::OPERATOR, Tango::PIPE_READ), spec(s) {}
+
+    void read(Tango::DeviceImpl *dev) override;   /* defined after zval->blob */
+};
+
 class PhpDeviceClass;
 
 class PhpDevice : public Tango::Device_5Impl
@@ -1195,6 +1459,113 @@ static zend_object *php_obj_of(Tango::DeviceImpl *dev)
     return static_cast<PhpDevice *>(dev)->php_obj;
 }
 
+/* ----- server pipe: PHP assoc array -> DevicePipeBlob ----- */
+
+static void zval_into_pipeblob(zval *assoc, Tango::DevicePipeBlob &blob);
+
+/* cppTango's numeric operator<<(vector<T>&) references the caller's buffer
+ * rather than copying it (string vectors do copy). These buffers keep the
+ * inserted numeric vectors alive until the blob is serialised, i.e. until
+ * PhpPipe::read() returns. std::deque never invalidates references on push,
+ * so back() stays valid. Safe because BY_PROCESS serialises all upcalls. */
+struct PipeBufs {
+    std::deque<std::vector<double>> dbls;
+    std::deque<std::vector<Tango::DevLong>> longs;
+    void clear() { dbls.clear(); longs.clear(); }
+};
+static PipeBufs g_pipe_bufs;
+
+/* Insert one PHP value as the next element of a pipe blob, inferring its type.
+ * List arrays become vectors; associative arrays become nested blobs. */
+static void insert_pipe_value(Tango::DevicePipeBlob &blob, zval *val)
+{
+    switch (Z_TYPE_P(val)) {
+        case IS_TRUE: case IS_FALSE: {
+            Tango::DevBoolean b = zend_is_true(val) ? 1 : 0; blob << b; return;
+        }
+        case IS_LONG:   { Tango::DevLong x = (Tango::DevLong) Z_LVAL_P(val); blob << x; return; }
+        case IS_DOUBLE: { double x = Z_DVAL_P(val); blob << x; return; }
+        case IS_STRING: { std::string s(Z_STRVAL_P(val), Z_STRLEN_P(val)); blob << s; return; }
+        case IS_ARRAY: {
+            HashTable *ht = Z_ARRVAL_P(val);
+            if (!zend_array_is_list(ht)) {
+                Tango::DevicePipeBlob nested;
+                zval_into_pipeblob(val, nested);
+                blob << nested;
+                return;
+            }
+            /* list -> vector; pick double if any element is float, else long,
+             * unless the elements are strings. */
+            bool any_double = false, any_string = false;
+            zval *e;
+            ZEND_HASH_FOREACH_VAL(ht, e) {
+                if (Z_TYPE_P(e) == IS_DOUBLE) any_double = true;
+                else if (Z_TYPE_P(e) == IS_STRING) any_string = true;
+            } ZEND_HASH_FOREACH_END();
+
+            if (any_string) {
+                std::vector<std::string> v;   /* string vectors are copied by cppTango */
+                ZEND_HASH_FOREACH_VAL(ht, e) {
+                    zend_string *s = zval_get_string(e);
+                    v.emplace_back(ZSTR_VAL(s), ZSTR_LEN(s));
+                    zend_string_release(s);
+                } ZEND_HASH_FOREACH_END();
+                blob << v;
+            } else if (any_double) {
+                g_pipe_bufs.dbls.emplace_back();
+                std::vector<double> &v = g_pipe_bufs.dbls.back();
+                ZEND_HASH_FOREACH_VAL(ht, e) { v.push_back(zval_get_double(e)); } ZEND_HASH_FOREACH_END();
+                blob << v;
+            } else {
+                g_pipe_bufs.longs.emplace_back();
+                std::vector<Tango::DevLong> &v = g_pipe_bufs.longs.back();
+                ZEND_HASH_FOREACH_VAL(ht, e) { v.push_back((Tango::DevLong) zval_get_long(e)); } ZEND_HASH_FOREACH_END();
+                blob << v;
+            }
+            return;
+        }
+        default: {
+            Tango::DevLong z = 0; blob << z; return;   /* null/other -> 0 */
+        }
+    }
+}
+
+static void zval_into_pipeblob(zval *assoc, Tango::DevicePipeBlob &blob)
+{
+    HashTable *ht = Z_ARRVAL_P(assoc);
+    std::vector<std::string> names;
+    zend_string *key; zend_ulong idx; zval *val;
+    ZEND_HASH_FOREACH_KEY_VAL(ht, idx, key, val) {
+        if (key) names.emplace_back(ZSTR_VAL(key), ZSTR_LEN(key));
+        else names.push_back(std::to_string((zend_long) idx));
+        (void) val;
+    } ZEND_HASH_FOREACH_END();
+
+    blob.set_data_elt_nb(names.size());
+    blob.set_data_elt_names(names);
+
+    ZEND_HASH_FOREACH_VAL(ht, val) {
+        insert_pipe_value(blob, val);
+    } ZEND_HASH_FOREACH_END();
+}
+
+void PhpPipe::read(Tango::DeviceImpl *dev)
+{
+    g_pipe_bufs.clear();   /* release buffers from the previous read */
+    zend_object *obj = php_obj_of(dev);
+    std::string method = "read_" + spec.name;
+    zval retval;
+    php_call_method(obj, method.c_str(), 0, nullptr, &retval, method.c_str());
+
+    Tango::DevicePipeBlob &blob = get_blob();
+    blob.set_name(spec.name);
+    if (Z_TYPE(retval) == IS_ARRAY) {
+        zval_into_pipeblob(&retval, blob);
+    }
+    set_value_flag(true);       /* signal that the blob has been populated */
+    zval_ptr_dtor(&retval);
+}
+
 class PhpDeviceClass : public Tango::DeviceClass
 {
 public:
@@ -1212,11 +1583,20 @@ public:
     void attribute_factory(std::vector<Tango::Attr *> &att_list) override
     {
         for (auto &a : reg->attrs) {
-            if (a.format == Tango::SPECTRUM) {
+            if (a.format == Tango::IMAGE) {
+                att_list.push_back(new PhpImageAttr(a));
+            } else if (a.format == Tango::SPECTRUM) {
                 att_list.push_back(new PhpSpectrumAttr(a));
             } else {
                 att_list.push_back(new PhpAttr(a));
             }
+        }
+    }
+
+    void pipe_factory() override
+    {
+        for (auto &p : reg->pipes) {
+            pipe_list.push_back(new PhpPipe(p));
         }
     }
 
@@ -1308,16 +1688,221 @@ PHP_METHOD(ServerDevice, init_device)
     ZEND_PARSE_PARAMETERS_NONE();
 }
 
+/* get_property(string $name, $default = null): mixed
+ * Reads a device property from the Tango database. Returns a string for a
+ * single value, an array for multiple, or $default when unset. */
+PHP_METHOD(ServerDevice, get_property)
+{
+    char *name; size_t name_len;
+    zval *def = nullptr;
+    ZEND_PARSE_PARAMETERS_START(1, 2)
+        Z_PARAM_STRING(name, name_len)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_ZVAL(def)
+    ZEND_PARSE_PARAMETERS_END();
+
+    Tango::DeviceImpl *d = device_of_this(getThis());
+    if (!d) RETURN_NULL();
+    try {
+        Tango::DbData data;
+        data.push_back(Tango::DbDatum(std::string(name, name_len)));
+        d->get_db_device()->get_property(data);
+
+        if (data[0].is_empty()) {
+            if (def) RETURN_ZVAL(def, 1, 0);
+            RETURN_NULL();
+        }
+        if (data[0].size() > 1) {
+            std::vector<std::string> v;
+            data[0] >> v;
+            array_init(return_value);
+            php_array_from_strings(return_value, v);
+        } else {
+            std::string s;
+            data[0] >> s;
+            RETURN_STRINGL(s.c_str(), s.size());
+        }
+    } catch (Tango::DevFailed &e) { throw_tango_devfailed(e); RETURN_THROWS(); }
+}
+
+/* add_attribute(string $name, int $type, int $writeType = READ,
+ *               int $maxX = 0, int $maxY = 0): void  -- dynamic attribute. */
+PHP_METHOD(ServerDevice, add_attribute)
+{
+    char *name; size_t name_len;
+    zend_long type;
+    zend_long wtype = Tango::READ, max_x = 0, max_y = 0;
+    ZEND_PARSE_PARAMETERS_START(2, 5)
+        Z_PARAM_STRING(name, name_len)
+        Z_PARAM_LONG(type)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_LONG(wtype)
+        Z_PARAM_LONG(max_x)
+        Z_PARAM_LONG(max_y)
+    ZEND_PARSE_PARAMETERS_END();
+
+    Tango::DeviceImpl *d = device_of_this(getThis());
+    if (!d) RETURN_NULL();
+
+    AttrSpec a;
+    a.name = std::string(name, name_len);
+    a.data_type = (long) type;
+    a.w_type = (Tango::AttrWriteType) wtype;
+    a.max_x = (long) max_x;
+    a.max_y = (long) max_y;
+    Tango::Attr *attr;
+    if (max_y > 0)      { a.format = Tango::IMAGE;    attr = new PhpImageAttr(a); }
+    else if (max_x > 0) { a.format = Tango::SPECTRUM; attr = new PhpSpectrumAttr(a); }
+    else                { a.format = Tango::SCALAR;   attr = new PhpAttr(a); }
+
+    try {
+        d->add_attribute(attr);
+        /* record the spec so events/introspection can find this attribute */
+        PhpDevice *pd = static_cast<PhpDevice *>(d);
+        if (pd->reg) pd->reg->attrs.push_back(a);
+    } catch (Tango::DevFailed &e) { throw_tango_devfailed(e); RETURN_THROWS(); }
+}
+
+/* set_change_event(string $attr, bool $implemented = true, bool $detect = false) */
+PHP_METHOD(ServerDevice, set_change_event)
+{
+    char *name; size_t name_len;
+    bool implemented = 1, detect = 0;
+    ZEND_PARSE_PARAMETERS_START(1, 3)
+        Z_PARAM_STRING(name, name_len)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_BOOL(implemented)
+        Z_PARAM_BOOL(detect)
+    ZEND_PARSE_PARAMETERS_END();
+
+    Tango::DeviceImpl *d = device_of_this(getThis());
+    if (!d) RETURN_NULL();
+    d->set_change_event(std::string(name, name_len), implemented, detect);
+}
+
+/* Look up an attribute spec by name from the active registration. */
+static const AttrSpec *find_attr_spec(Tango::DeviceImpl *d, const std::string &name)
+{
+    PhpDevice *pd = static_cast<PhpDevice *>(d);
+    if (!pd->reg) return nullptr;
+    for (auto &a : pd->reg->attrs) {
+        if (a.name == name) return &a;
+    }
+    return nullptr;
+}
+
+static void do_push_event(Tango::DeviceImpl *d, const AttrSpec &spec, zval *v, bool archive)
+{
+    if (spec.format == Tango::SPECTRUM || spec.format == Tango::IMAGE) {
+        /* only double/long spectra supported for push */
+        HashTable *ht = Z_ARRVAL_P(v);
+        long n = (long) zend_hash_num_elements(ht);
+        zval *e;
+        if (spec.data_type == Tango::DEV_LONG) {
+            Tango::DevLong *p = new Tango::DevLong[n > 0 ? n : 1]; long i = 0;
+            ZEND_HASH_FOREACH_VAL(ht, e) { p[i++] = (Tango::DevLong) zval_get_long(e); } ZEND_HASH_FOREACH_END();
+            if (archive) d->push_archive_event(spec.name, p, n, 0, true);
+            else         d->push_change_event(spec.name, p, n, 0, true);
+        } else {
+            Tango::DevDouble *p = new Tango::DevDouble[n > 0 ? n : 1]; long i = 0;
+            ZEND_HASH_FOREACH_VAL(ht, e) { p[i++] = (Tango::DevDouble) zval_get_double(e); } ZEND_HASH_FOREACH_END();
+            if (archive) d->push_archive_event(spec.name, p, n, 0, true);
+            else         d->push_change_event(spec.name, p, n, 0, true);
+        }
+        return;
+    }
+
+    switch (spec.data_type) {
+        case Tango::DEV_BOOLEAN: { Tango::DevBoolean *p = new Tango::DevBoolean[1]; p[0] = zend_is_true(v) ? 1 : 0; if (archive) d->push_archive_event(spec.name, p, 1, 0, true); else d->push_change_event(spec.name, p, 1, 0, true); return; }
+        case Tango::DEV_LONG:    { Tango::DevLong *p = new Tango::DevLong[1]; p[0] = (Tango::DevLong) zval_get_long(v); if (archive) d->push_archive_event(spec.name, p, 1, 0, true); else d->push_change_event(spec.name, p, 1, 0, true); return; }
+        case Tango::DEV_STRING:  { zend_string *s = zval_get_string(v); Tango::DevString *p = new Tango::DevString[1]; p[0] = CORBA::string_dup(ZSTR_VAL(s)); zend_string_release(s); if (archive) d->push_archive_event(spec.name, p, 1, 0, true); else d->push_change_event(spec.name, p, 1, 0, true); return; }
+        default:                 { Tango::DevDouble *p = new Tango::DevDouble[1]; p[0] = (Tango::DevDouble) zval_get_double(v); if (archive) d->push_archive_event(spec.name, p, 1, 0, true); else d->push_change_event(spec.name, p, 1, 0, true); return; }
+    }
+}
+
+/* push_change_event(string $attr, $value): void */
+PHP_METHOD(ServerDevice, push_change_event)
+{
+    char *name; size_t name_len;
+    zval *val;
+    ZEND_PARSE_PARAMETERS_START(2, 2)
+        Z_PARAM_STRING(name, name_len)
+        Z_PARAM_ZVAL(val)
+    ZEND_PARSE_PARAMETERS_END();
+
+    Tango::DeviceImpl *d = device_of_this(getThis());
+    if (!d) RETURN_NULL();
+    const AttrSpec *spec = find_attr_spec(d, std::string(name, name_len));
+    if (!spec) {
+        zend_throw_exception_ex(tango_devfailed_ce, 0, "Unknown attribute '%s'", name);
+        RETURN_THROWS();
+    }
+    try {
+        do_push_event(d, *spec, val, false);
+    } catch (Tango::DevFailed &e) { throw_tango_devfailed(e); RETURN_THROWS(); }
+}
+
+/* push_archive_event(string $attr, $value): void */
+PHP_METHOD(ServerDevice, push_archive_event)
+{
+    char *name; size_t name_len;
+    zval *val;
+    ZEND_PARSE_PARAMETERS_START(2, 2)
+        Z_PARAM_STRING(name, name_len)
+        Z_PARAM_ZVAL(val)
+    ZEND_PARSE_PARAMETERS_END();
+
+    Tango::DeviceImpl *d = device_of_this(getThis());
+    if (!d) RETURN_NULL();
+    const AttrSpec *spec = find_attr_spec(d, std::string(name, name_len));
+    if (!spec) {
+        zend_throw_exception_ex(tango_devfailed_ce, 0, "Unknown attribute '%s'", name);
+        RETURN_THROWS();
+    }
+    try {
+        do_push_event(d, *spec, val, true);
+    } catch (Tango::DevFailed &e) { throw_tango_devfailed(e); RETURN_THROWS(); }
+}
+
 ZEND_BEGIN_ARG_INFO_EX(arginfo_sd_str, 0, 0, 1)
     ZEND_ARG_TYPE_INFO(0, value, IS_STRING, 0)
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_INFO_EX(arginfo_sd_get_property, 0, 0, 1)
+    ZEND_ARG_TYPE_INFO(0, name, IS_STRING, 0)
+    ZEND_ARG_INFO(0, default)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_sd_add_attr, 0, 0, 2)
+    ZEND_ARG_TYPE_INFO(0, name, IS_STRING, 0)
+    ZEND_ARG_TYPE_INFO(0, type, IS_LONG, 0)
+    ZEND_ARG_TYPE_INFO(0, writeType, IS_LONG, 0)
+    ZEND_ARG_TYPE_INFO(0, maxX, IS_LONG, 0)
+    ZEND_ARG_TYPE_INFO(0, maxY, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_sd_set_change_event, 0, 0, 1)
+    ZEND_ARG_TYPE_INFO(0, attr, IS_STRING, 0)
+    ZEND_ARG_TYPE_INFO(0, implemented, _IS_BOOL, 0)
+    ZEND_ARG_TYPE_INFO(0, detect, _IS_BOOL, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_sd_push_event, 0, 0, 2)
+    ZEND_ARG_TYPE_INFO(0, attr, IS_STRING, 0)
+    ZEND_ARG_INFO(0, value)
+ZEND_END_ARG_INFO()
+
 static const zend_function_entry tango_serverdevice_methods[] = {
-    PHP_ME(ServerDevice, set_state,   arginfo_sd_str, ZEND_ACC_PUBLIC)
-    PHP_ME(ServerDevice, set_status,  arginfo_sd_str, ZEND_ACC_PUBLIC)
-    PHP_ME(ServerDevice, get_state,   arginfo_none,   ZEND_ACC_PUBLIC)
-    PHP_ME(ServerDevice, get_name,    arginfo_none,   ZEND_ACC_PUBLIC)
-    PHP_ME(ServerDevice, init_device, arginfo_none,   ZEND_ACC_PUBLIC)
+    PHP_ME(ServerDevice, set_state,          arginfo_sd_str,              ZEND_ACC_PUBLIC)
+    PHP_ME(ServerDevice, set_status,         arginfo_sd_str,              ZEND_ACC_PUBLIC)
+    PHP_ME(ServerDevice, get_state,          arginfo_none,                ZEND_ACC_PUBLIC)
+    PHP_ME(ServerDevice, get_name,           arginfo_none,                ZEND_ACC_PUBLIC)
+    PHP_ME(ServerDevice, init_device,        arginfo_none,                ZEND_ACC_PUBLIC)
+    PHP_ME(ServerDevice, get_property,       arginfo_sd_get_property,     ZEND_ACC_PUBLIC)
+    PHP_ME(ServerDevice, add_attribute,      arginfo_sd_add_attr,         ZEND_ACC_PUBLIC)
+    PHP_ME(ServerDevice, set_change_event,   arginfo_sd_set_change_event, ZEND_ACC_PUBLIC)
+    PHP_ME(ServerDevice, push_change_event,  arginfo_sd_push_event,       ZEND_ACC_PUBLIC)
+    PHP_ME(ServerDevice, push_archive_event, arginfo_sd_push_event,       ZEND_ACC_PUBLIC)
     PHP_FE_END
 };
 
@@ -1390,12 +1975,14 @@ PHP_METHOD(Server, attribute)
     zend_long type;
     zend_long wtype = Tango::READ;
     zend_long max_x = 0;
-    ZEND_PARSE_PARAMETERS_START(2, 4)
+    zend_long max_y = 0;
+    ZEND_PARSE_PARAMETERS_START(2, 5)
         Z_PARAM_STRING(name, name_len)
         Z_PARAM_LONG(type)
         Z_PARAM_OPTIONAL
         Z_PARAM_LONG(wtype)
         Z_PARAM_LONG(max_x)
+        Z_PARAM_LONG(max_y)
     ZEND_PARSE_PARAMETERS_END();
 
     tango_server_obj *o = tango_server_from_obj(Z_OBJ_P(getThis()));
@@ -1404,8 +1991,25 @@ PHP_METHOD(Server, attribute)
     a.data_type = (long) type;
     a.w_type = (Tango::AttrWriteType) wtype;
     a.max_x = (long) max_x;
-    a.format = (max_x > 0) ? Tango::SPECTRUM : Tango::SCALAR;
+    a.max_y = (long) max_y;
+    if (max_y > 0)      a.format = Tango::IMAGE;
+    else if (max_x > 0) a.format = Tango::SPECTRUM;
+    else                a.format = Tango::SCALAR;
     o->reg->attrs.push_back(a);
+}
+
+/* pipe(string $name): void  -- handled by read_<name>() returning an assoc array */
+PHP_METHOD(Server, pipe)
+{
+    char *name; size_t name_len;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STRING(name, name_len)
+    ZEND_PARSE_PARAMETERS_END();
+
+    tango_server_obj *o = tango_server_from_obj(Z_OBJ_P(getThis()));
+    PipeSpec p;
+    p.name = std::string(name, name_len);
+    o->reg->pipes.push_back(p);
 }
 
 /* command(string $name, int $inType = DEV_VOID, int $outType = DEV_VOID) */
@@ -1502,6 +2106,11 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_srv_attr, 0, 0, 2)
     ZEND_ARG_TYPE_INFO(0, type, IS_LONG, 0)
     ZEND_ARG_TYPE_INFO(0, writeType, IS_LONG, 0)
     ZEND_ARG_TYPE_INFO(0, maxX, IS_LONG, 0)
+    ZEND_ARG_TYPE_INFO(0, maxY, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_srv_pipe, 0, 0, 1)
+    ZEND_ARG_TYPE_INFO(0, name, IS_STRING, 0)
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_srv_cmd, 0, 0, 1)
@@ -1518,6 +2127,7 @@ static const zend_function_entry tango_server_methods[] = {
     PHP_ME(Server, __construct, arginfo_srv_ctor, ZEND_ACC_PUBLIC | ZEND_ACC_CTOR)
     PHP_ME(Server, attribute,   arginfo_srv_attr, ZEND_ACC_PUBLIC)
     PHP_ME(Server, command,     arginfo_srv_cmd,  ZEND_ACC_PUBLIC)
+    PHP_ME(Server, pipe,        arginfo_srv_pipe, ZEND_ACC_PUBLIC)
     PHP_ME(Server, run,         arginfo_srv_run,  ZEND_ACC_PUBLIC)
     PHP_FE_END
 };
@@ -1532,11 +2142,23 @@ PHP_FUNCTION(tango_version)
     RETURN_STRING(Tango::TgLibVers);
 }
 
+/* tango_cleanup(): shut down the client-side Tango threads (event consumer,
+ * heartbeat, ORB). Call it before a client script that used subscribe_event()
+ * exits, otherwise leftover background threads keep the process alive. */
+PHP_FUNCTION(tango_cleanup)
+{
+    if (zend_parse_parameters_none() == FAILURE) RETURN_THROWS();
+    try {
+        Tango::ApiUtil::cleanup();
+    } catch (...) { /* best-effort */ }
+}
+
 ZEND_BEGIN_ARG_INFO_EX(arginfo_tango_version, 0, 0, 0)
 ZEND_END_ARG_INFO()
 
 static const zend_function_entry tango_functions[] = {
     PHP_FE(tango_version, arginfo_tango_version)
+    PHP_FE(tango_cleanup, arginfo_tango_version)
     PHP_FE_END
 };
 
@@ -1610,6 +2232,16 @@ PHP_MINIT_FUNCTION(tango)
     TANGO_NS_LONG_CONST("WRITE",            Tango::WRITE);
     TANGO_NS_LONG_CONST("READ_WRITE",       Tango::READ_WRITE);
     TANGO_NS_LONG_CONST("READ_WITH_WRITE",  Tango::READ_WITH_WRITE);
+
+    /* event types (for subscribe_event) */
+    TANGO_NS_LONG_CONST("CHANGE_EVENT",           Tango::CHANGE_EVENT);
+    TANGO_NS_LONG_CONST("PERIODIC_EVENT",         Tango::PERIODIC_EVENT);
+    TANGO_NS_LONG_CONST("ARCHIVE_EVENT",          Tango::ARCHIVE_EVENT);
+    TANGO_NS_LONG_CONST("USER_EVENT",             Tango::USER_EVENT);
+    TANGO_NS_LONG_CONST("ATTR_CONF_EVENT",        Tango::ATTR_CONF_EVENT);
+    TANGO_NS_LONG_CONST("DATA_READY_EVENT",       Tango::DATA_READY_EVENT);
+    TANGO_NS_LONG_CONST("INTERFACE_CHANGE_EVENT", Tango::INTERFACE_CHANGE_EVENT);
+    TANGO_NS_LONG_CONST("PIPE_EVENT",             Tango::PIPE_EVENT);
 #undef TANGO_NS_LONG_CONST
 
     return SUCCESS;

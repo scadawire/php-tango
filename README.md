@@ -31,11 +31,16 @@ $out = $dev->command_inout("DevDouble", 2.5);
 Both **client** and **server** sides work, verified end-to-end against a live
 Tango database with cppTango 9.5.0 on PHP 8.3.
 
-- **Client** (`Tango\DeviceProxy`): attribute reads/writes, command calls,
-  state/status, timeouts and error handling — verified against `TangoTest`.
+- **Client** (`Tango\DeviceProxy`): attribute reads/writes (scalar, spectrum,
+  image), command calls, pipes, events (pull model), state/status, timeouts and
+  error handling.
 - **Server** (`Tango\Server\Server` / `Tango\Server\Device`): a device server
-  written entirely in PHP, with attribute and command handlers as PHP methods —
-  verified by driving it from both this extension's client **and** pytango.
+  written entirely in PHP — scalar/spectrum/image attributes, commands, device
+  properties, dynamic attributes, change/archive events, and pipes, all with
+  handlers as PHP methods.
+
+Verified end-to-end by driving a PHP server from both this extension's client
+**and** pytango.
 
 ## Requirements
 
@@ -125,8 +130,16 @@ The cppTango library version the extension was built against, e.g. `"9.5.0"`.
 | `command_inout(string $cmd, mixed $arg = null): mixed` | `.command_inout(cmd, arg)` | `null` for `DevVoid`; arg coerced to the command's input type |
 | `set_timeout_millis(int $ms): void` | `.set_timeout_millis(ms)` | |
 | `get_timeout_millis(): int` | `.get_timeout_millis()` | |
+| `read_pipe(string $name): array` | `.read_pipe(name)` | `['name'=>.., 'data'=>[..]]` |
+| `subscribe_event(string $attr, int $type, int $q = 100, bool $stateless = true): int` | `.subscribe_event(...)` | Pull model; returns event id |
+| `get_events(int $id): array` | `.get_events(id)` | Pull buffered events |
+| `unsubscribe_event(int $id): void` | `.unsubscribe_event(id)` | |
 | `$dev->attr` (via `__get`) | `dev.attr` | Shortcut for `read_attribute("attr")` |
 | `$dev->attr = $v` (via `__set`) | `dev.attr = v` | Shortcut for `write_attribute("attr", $v)` |
+
+Image attributes come back from `read_attribute()` as a nested (2D) array.
+`tango_version()` and `tango_cleanup()` are global functions (the latter stops
+client event threads before exit).
 
 ### Type mapping
 
@@ -196,15 +209,91 @@ php -d extension=./modules/tango.so examples/server.php test
 
 Server-supported attribute types: `DEV_BOOLEAN`, `DEV_SHORT`, `DEV_USHORT`,
 `DEV_LONG`, `DEV_ULONG`, `DEV_LONG64`, `DEV_ULONG64`, `DEV_FLOAT`, `DEV_DOUBLE`,
-`DEV_STRING`, `DEV_STATE` (scalar), plus `DEV_DOUBLE`/`DEV_LONG` spectra.
-Command in/out types: the scalar `DEV_*` types plus `DEVVAR_DOUBLEARRAY`,
+`DEV_STRING`, `DEV_STATE` (scalar), plus `DEV_DOUBLE`/`DEV_LONG` spectra and
+images. Command in/out types: the scalar `DEV_*` types plus `DEVVAR_DOUBLEARRAY`,
 `DEVVAR_LONGARRAY`, `DEVVAR_STRINGARRAY`.
+
+### Image attributes
+
+Declare with a positive `maxY`; the read handler returns an **array of rows**
+(row-major). On the client, `read_attribute()` returns the same nested array.
+
+```php
+// server
+$server->attribute("frame", Tango\DEV_DOUBLE, Tango\READ, 4, 3);  // 4x3 image
+public function read_frame(): array { return [[1,2,3,4],[5,6,7,8],[9,10,11,12]]; }
+// client
+$rows = $dev->read_attribute("frame");   // [[...],[...],[...]]
+```
+
+### Device properties
+
+Read Tango database properties inside the device (typically from `init_device`):
+
+```php
+$max = (float) $this->get_property("MaxCurrent", "10.0");  // default if unset
+```
+
+Returns a string for a single value, an array for several, or the default.
+
+### Dynamic attributes
+
+Add attributes at runtime (e.g. in `init_device`); they are served by the same
+`read_<name>()` / `write_<name>()` convention:
+
+```php
+$this->add_attribute("headroom", Tango\DEV_DOUBLE, Tango\READ);
+public function read_headroom(): float { return $this->max - $this->current; }
+```
+
+### Events
+
+Server side — enable events (once) and push values when they change:
+
+```php
+$this->set_change_event("current", true, false);   // in init_device
+$this->push_change_event("current", $newValue);     // when it changes
+// also: push_archive_event()
+```
+
+Client side uses the **pull model** (thread-safe for PHP): subscribe, then poll
+with `get_events()`:
+
+```php
+$id = $dev->subscribe_event("current", Tango\CHANGE_EVENT, 100, true);
+foreach ($dev->get_events($id) as $e) {
+    // $e = ['attr_name'=>.., 'event'=>.., 'err'=>bool, 'value'=>mixed]
+}
+$dev->unsubscribe_event($id);
+tango_cleanup();   // stop background threads before the script exits
+```
+
+> A client that subscribes to events starts background threads; call
+> `tango_cleanup()` before exit or the process will not terminate promptly.
+
+### Pipes
+
+Server side — declare a pipe and return an associative array (element name =>
+value); associative sub-arrays become nested blobs:
+
+```php
+$server->pipe("status_pipe");
+public function read_status_pipe(): array {
+    return ["current" => 1.5, "labels" => ["I","U"], "readings" => [1.5, 345.0]];
+}
+```
+
+Client side:
+
+```php
+$p = $dev->read_pipe("status_pipe");   // ['name'=>.., 'data'=>[elt=>value,..]]
+```
 
 ### How it works, and the threading note
 
 `run()` wires generic C++ bridge classes (`PhpDeviceClass` / `PhpDevice` /
-`PhpCommand` / `PhpAttr`) into cppTango, and each Tango request is forwarded to
-the matching PHP method.
+`PhpCommand` / `PhpAttr` / `PhpSpectrumAttr` / `PhpImageAttr` / `PhpPipe`) into
+cppTango, and each Tango request is forwarded to the matching PHP method.
 
 cppTango dispatches requests on omniORB worker threads. Because the PHP
 interpreter is not thread-safe (this is an NTS build), the server sets the
@@ -217,12 +306,12 @@ runaway recursion. Run **one** PHP server per process.
 
 - Attribute reads return the *read* value only (matching PyTango's
   `.value`); the set value of read-write attributes is not exposed yet.
-- `DevEncoded` and image-attribute dimensions are not yet surfaced (images come
-  back as a flat, row-major array).
-- Server side supports scalar and (double/long) spectrum attributes and the
-  common command types; image attributes, device/class properties, dynamic
-  attributes, events and pipes are not implemented yet.
-- Events, groups and pipes are not implemented on the client side.
+- Images are surfaced as nested (2D) arrays; spectra as flat arrays.
+- Server image/spectrum attributes and event pushes support `DEV_DOUBLE` and
+  `DEV_LONG` element types; scalars cover the full set of `DEV_*` types.
+- Client events use the pull model (`subscribe_event` + `get_events`); the
+  push/callback model is not exposed. `DevEncoded`, groups, and class
+  properties are not implemented yet.
 
 ## Layout
 

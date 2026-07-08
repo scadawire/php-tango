@@ -95,6 +95,40 @@ class DeviceProxy
     /** Get the client-side request timeout in milliseconds. */
     public function get_timeout_millis(): int {}
 
+    /**
+     * Read a pipe. Returns ['name' => rootBlobName, 'data' => [elt => value, …]];
+     * nested blobs become nested associative arrays.
+     *
+     * @return array{name: string, data: array}
+     * @throws DevFailed
+     */
+    public function read_pipe(string $name): array {}
+
+    /**
+     * Subscribe to an attribute event using the pull model, returning an event
+     * id. Buffered events are retrieved with get_events().
+     *
+     * @param int  $eventType  One of the \Tango\*_EVENT constants.
+     * @param int  $queueSize  Event buffer size.
+     * @param bool $stateless  If true, subscription succeeds even if the device
+     *                         is not yet reachable.
+     * @throws DevFailed
+     */
+    public function subscribe_event(string $attr, int $eventType, int $queueSize = 100, bool $stateless = true): int {}
+
+    /**
+     * Pull buffered events for a subscription. Each element is
+     * ['attr_name'=>string, 'event'=>string, 'err'=>bool, 'value'=>mixed|null,
+     *  'error'=>string?].
+     *
+     * @return array<int, array>
+     * @throws DevFailed
+     */
+    public function get_events(int $eventId): array {}
+
+    /** Cancel an event subscription. */
+    public function unsubscribe_event(int $eventId): void {}
+
     /** PyTango-style attribute read: $dev->attr === $dev->read_attribute("attr"). */
     public function __get(string $name) {}
 
@@ -107,6 +141,13 @@ class DeviceProxy
  * e.g. "9.5.0".
  */
 function tango_version(): string {}
+
+/**
+ * Shut down the client-side Tango threads (event consumer, heartbeat, ORB).
+ * Call before a script that used subscribe_event() exits, otherwise leftover
+ * background threads keep the process alive.
+ */
+function tango_cleanup(): void {}
 
 /* ----------------------------------------------------------------------- *
  * Data-type constants (subset of Tango::CmdArgType), used when declaring   *
@@ -134,6 +175,16 @@ const READ            = 0;
 const READ_WITH_WRITE = 1;
 const WRITE           = 2;
 const READ_WRITE      = 3;
+
+/* Event types (Tango::EventType), for DeviceProxy::subscribe_event(). */
+const CHANGE_EVENT           = 0;
+const PERIODIC_EVENT         = 2;
+const ARCHIVE_EVENT          = 3;
+const USER_EVENT             = 4;
+const ATTR_CONF_EVENT        = 5;
+const DATA_READY_EVENT       = 6;
+const INTERFACE_CHANGE_EVENT = 7;
+const PIPE_EVENT             = 8;
 
 namespace Tango\Server;
 
@@ -166,6 +217,30 @@ class Device
 
     /** Called once when the device starts. Override to initialise. */
     public function init_device(): void {}
+
+    /**
+     * Read a device property from the Tango database. Returns a string for a
+     * single value, an array of strings for several, or $default when unset.
+     *
+     * @return string|array|mixed
+     */
+    public function get_property(string $name, mixed $default = null): mixed {}
+
+    /**
+     * Add a dynamic attribute at runtime (e.g. from init_device()). Handled by
+     * read_<name>()/write_<name>() like a declared attribute. A positive $maxX
+     * makes a spectrum; a positive $maxY makes an image.
+     */
+    public function add_attribute(string $name, int $type, int $writeType = \Tango\READ, int $maxX = 0, int $maxY = 0): void {}
+
+    /** Enable/declare change events for an attribute (usually in init_device). */
+    public function set_change_event(string $attr, bool $implemented = true, bool $detect = false): void {}
+
+    /** Push a change event for an attribute with the given value. */
+    public function push_change_event(string $attr, mixed $value): void {}
+
+    /** Push an archive event for an attribute with the given value. */
+    public function push_archive_event(string $attr, mixed $value): void {}
 }
 
 /**
@@ -188,13 +263,15 @@ class Server
 
     /**
      * Declare an attribute. Handlers are read_<name>() and (for writable
-     * attributes) write_<name>($value). A positive $maxX makes it a spectrum.
+     * attributes) write_<name>($value). A positive $maxX makes it a spectrum;
+     * a positive $maxY makes it an image (read handler returns an array of rows).
      *
      * @param int $type      One of the \Tango\DEV_* constants.
      * @param int $writeType One of \Tango\READ, WRITE, READ_WRITE, READ_WITH_WRITE.
      * @param int $maxX      Max X dimension; >0 declares a spectrum attribute.
+     * @param int $maxY      Max Y dimension; >0 declares an image attribute.
      */
-    public function attribute(string $name, int $type, int $writeType = \Tango\READ, int $maxX = 0): void {}
+    public function attribute(string $name, int $type, int $writeType = \Tango\READ, int $maxX = 0, int $maxY = 0): void {}
 
     /**
      * Declare a command, handled by a method of the same name on the device.
@@ -203,6 +280,12 @@ class Server
      * @param int $outType \Tango\DEV_* type of the result (DEV_VOID for none).
      */
     public function command(string $name, int $inType = \Tango\DEV_VOID, int $outType = \Tango\DEV_VOID): void {}
+
+    /**
+     * Declare a pipe, handled by read_<name>() returning an associative array
+     * (element name => value; associative sub-arrays become nested blobs).
+     */
+    public function pipe(string $name): void {}
 
     /**
      * Run the Tango event loop (blocks until the server is stopped).
