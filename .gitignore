@@ -1,0 +1,47 @@
+# phpize / autotools build artifacts
+*.lo
+*.la
+*.o
+*.dep
+.libs/
+.deps/
+modules/
+build/
+autom4te.cache/
+configure
+configure.ac
+config.h
+config.h.in
+config.log
+config.status
+config.nice
+config.guess
+config.sub
+libtool
+ltmain.sh
+Makefile
+Makefile.objects
+Makefile.fragments
+Makefile.global
+acinclude.m4
+aclocal.m4
+install-sh
+missing
+mkinstalldirs
+run-tests.php
+*.dSYM/
+
+# private header-shim created by config.m4
+tango-shim/
+
+# test output
+tests/*.diff
+tests/*.out
+tests/*.exp
+tests/*.log
+tests/*.php
+tests/*.sh
+!tests/*.phpt
+
+# local editor/agent settings
+.claude/
