@@ -1306,7 +1306,10 @@ class PhpCommand : public Tango::Command
     CmdSpec spec;
 public:
     PhpCommand(const CmdSpec &s)
-        : Tango::Command(s.name, (Tango::CmdArgType) s.in_type, (Tango::CmdArgType) s.out_type),
+        /* const_cast: some cppTango versions declare the name parameter as a
+         * non-const std::string& even though the ctor only copies it. */
+        : Tango::Command(const_cast<std::string &>(s.name),
+                         (Tango::CmdArgType) s.in_type, (Tango::CmdArgType) s.out_type),
           spec(s) {}
 
     CORBA::Any *execute(Tango::DeviceImpl *dev, const CORBA::Any &in_any) override
@@ -1408,7 +1411,7 @@ class PhpPipe : public Tango::Pipe
 public:
     PipeSpec spec;
     PhpPipe(const PipeSpec &s)
-        : Tango::Pipe(s.name, Tango::OPERATOR, Tango::PIPE_READ), spec(s) {}
+        : Tango::Pipe(const_cast<std::string &>(s.name), Tango::OPERATOR, Tango::PIPE_READ), spec(s) {}
 
     void read(Tango::DeviceImpl *dev) override;   /* defined after zval->blob */
 };
@@ -1422,7 +1425,7 @@ public:
     zend_object *php_obj;    /* the PHP device instance (owns a ref) */
 
     PhpDevice(Tango::DeviceClass *cl, const std::string &name, ServerReg *r)
-        : Tango::Device_5Impl(cl, name), reg(r), php_obj(nullptr)
+        : Tango::Device_5Impl(cl, const_cast<std::string &>(name)), reg(r), php_obj(nullptr)
     {
         zval zobj;
         if (object_init_ex(&zobj, reg->php_ce) == SUCCESS) {
@@ -1606,7 +1609,9 @@ public:
             std::string dname = (const char *) (*devlist)[i];
             PhpDevice *dev = new PhpDevice(this, dname, reg);
             device_list.push_back(dev);
-            if (Tango::Util::instance()->use_db()) {
+            /* _UseDb is a stable public static across cppTango versions;
+             * use_db() was only added later. */
+            if (Tango::Util::_UseDb) {
                 export_device(dev);
             } else {
                 export_device(dev, dname.c_str());
