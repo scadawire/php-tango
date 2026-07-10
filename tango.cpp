@@ -26,6 +26,22 @@
  * second (possibly broken) Tango install shadows it in /usr/local. */
 #include <tango/tango.h>
 
+/* Only cppTango >= 10.3 ships TANGO_VERSION / TANGO_MAKE_VERSION; older
+ * releases define just the three components. Fill in the gap so the version
+ * checks below read the same against every supported cppTango. */
+#ifndef TANGO_MAKE_VERSION
+#define TANGO_MAKE_VERSION(major, minor, patch) ((major) * 10000 + (minor) * 100 + (patch))
+#endif
+#ifndef TANGO_VERSION
+#define TANGO_VERSION \
+    TANGO_MAKE_VERSION(TANGO_VERSION_MAJOR, TANGO_VERSION_MINOR, TANGO_VERSION_PATCH)
+#endif
+
+/* cppTango 10.3 dropped DServer::register_class_factory(): a device server now
+ * subclasses DServer, overrides the virtual class_factory(), and hands a
+ * constructor for that subclass to Util::register_dserver_constructor(). */
+#define PHP_TANGO_DSERVER_SUBCLASS (TANGO_VERSION >= TANGO_MAKE_VERSION(10, 3, 0))
+
 #include "php_tango.h"
 
 extern "C" {
@@ -1623,15 +1639,40 @@ public:
 /* class_factory hook: cppTango calls this to populate the class list. */
 static PhpDeviceClass *g_php_device_class = nullptr;
 
-static void php_class_factory(Tango::DServer *ds)
+static Tango::DeviceClass *php_device_class()
 {
     if (g_server_reg && !g_php_device_class) {
         g_php_device_class = new PhpDeviceClass(g_server_reg->class_name, g_server_reg);
     }
-    if (g_php_device_class) {
-        ds->_add_class(g_php_device_class);
+    return g_php_device_class;
+}
+
+#if PHP_TANGO_DSERVER_SUBCLASS
+
+class PhpDServer : public Tango::DServer
+{
+  public:
+    using Tango::DServer::DServer;
+
+  private:
+    void class_factory() override
+    {
+        if (Tango::DeviceClass *dc = php_device_class()) {
+            add_class(dc);
+        }
+    }
+};
+
+#else
+
+static void php_class_factory(Tango::DServer *ds)
+{
+    if (Tango::DeviceClass *dc = php_device_class()) {
+        ds->_add_class(dc);
     }
 }
+
+#endif
 
 /* ------------------------------------------------------------------------- */
 /* Tango\Server\Device (base class for PHP device implementations)           */
@@ -2073,7 +2114,9 @@ PHP_METHOD(Server, run)
     argv[argc] = nullptr;
 
     g_server_reg = o->reg;
+#if !PHP_TANGO_DSERVER_SUBCLASS
     Tango::DServer::register_class_factory(php_class_factory);
+#endif
 
     /* cppTango services requests on omniORB worker threads, whereas PHP 8.3's
      * stack-overflow guard captured the *main* thread's stack bounds at
@@ -2087,6 +2130,14 @@ PHP_METHOD(Server, run)
 
     try {
         Tango::Util *tg = Tango::Util::init(argc, argv);
+#if PHP_TANGO_DSERVER_SUBCLASS
+        /* Must be registered before server_init(), which builds the DServer. */
+        tg->register_dserver_constructor(
+            [](Tango::DeviceClass *cl, const std::string &name, const std::string &desc,
+               Tango::DevState sta, const std::string &status) -> Tango::DServer * {
+                return new PhpDServer(cl, name.c_str(), desc.c_str(), sta, status.c_str());
+            });
+#endif
         /* Serialise all upcalls process-wide so re-entrancy never reaches the
          * (non-thread-safe) PHP interpreter concurrently. */
         tg->set_serial_model(Tango::BY_PROCESS);

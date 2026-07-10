@@ -33,8 +33,17 @@ if test "$PHP_TANGO" != "no"; then
   PHP_REQUIRE_CXX()
   PHP_SUBST([TANGO_SHARED_LIBADD])
 
-  dnl cppTango 9.x requires at least C++14. Silence its deprecation noise.
-  TANGO_EXTRA_CXXFLAGS="-std=c++14 -Wno-deprecated-declarations -Wno-deprecated -DZEND_ENABLE_STATIC_TSRMLS_CACHE=1"
+  dnl cppTango 9.x requires at least C++14, cppTango 10.x at least C++17.
+  dnl Silence cppTango's deprecation noise either way.
+  TANGO_MAJOR=`echo "$TANGO_VERSION" | cut -d. -f1`
+  if test "$TANGO_MAJOR" -ge 10 2>/dev/null; then
+    TANGO_CXXSTD="-std=c++17"
+  else
+    TANGO_CXXSTD="-std=c++14"
+  fi
+  AC_MSG_RESULT([building with $TANGO_CXXSTD])
+
+  TANGO_EXTRA_CXXFLAGS="$TANGO_CXXSTD -Wno-deprecated-declarations -Wno-deprecated -DZEND_ENABLE_STATIC_TSRMLS_CACHE=1"
 
   dnl -----------------------------------------------------------------------
   dnl Resolve the cppTango header root that matches the linked library.
@@ -59,7 +68,7 @@ if test "$PHP_TANGO" != "no"; then
       ln -s "$cand/tango" "$TANGO_SHIM/tango"
       echo '#include <tango/tango.h>' > conftest-tango.cpp
       echo 'const char *php_tango_v = Tango::TgLibVers;' >> conftest-tango.cpp
-      if $CXX $CXXFLAGS -std=c++14 -I"$TANGO_SHIM" $TANGO_CFLAGS \
+      if $CXX $CXXFLAGS $TANGO_CXXSTD -I"$TANGO_SHIM" $TANGO_CFLAGS \
            -c conftest-tango.cpp -o conftest-tango.o >/dev/null 2>&1; then
         tango_root="$cand"
         rm -f conftest-tango.cpp conftest-tango.o

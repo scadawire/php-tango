@@ -29,7 +29,8 @@ $out = $dev->command_inout("DevDouble", 2.5);
 ## Status
 
 Both **client** and **server** sides work, verified end-to-end against a live
-Tango database with cppTango 9.5.0 on PHP 8.3.
+Tango database with cppTango 9.5.0 on PHP 8.3, and against cppTango 10.3.2
+(attributes, commands and change events, database-less).
 
 - **Client** (`Tango\DeviceProxy`): attribute reads/writes (scalar, spectrum,
   image), command calls, pipes, events (pull model), state/status, timeouts and
@@ -45,9 +46,10 @@ Verified end-to-end by driving a PHP server from both this extension's client
 ## Requirements
 
 - PHP 8.x with development headers (`phpize`, `php-config`)
-- cppTango (9.3+) and its dependencies (omniORB, zmq), discoverable via
+- cppTango (9.3 – 10.x) and its dependencies (omniORB, zmq), discoverable via
   `pkg-config --exists tango`
-- A C++14 compiler
+- A C++14 compiler for cppTango 9.x, or a C++17 one for cppTango 10.x
+  (`configure` picks the standard from the detected cppTango version)
 
 On Debian/Ubuntu:
 
@@ -91,6 +93,13 @@ phpize && ./configure --enable-tango && make
 `<tango/...>` includes resolve to the header root that matches the library it
 links against, even when a second install would otherwise shadow it on the
 compiler's default include path.
+
+When switching an existing build tree from one cppTango to another, drop the
+stale dependency file first — it still names headers from the old install:
+
+```sh
+rm -f tango.dep tango.lo
+```
 
 ## Running the example
 
@@ -317,7 +326,7 @@ runaway recursion. Run **one** PHP server per process.
 
 | File | Purpose |
 | --- | --- |
-| `config.m4` | Build configuration (pkg-config discovery, C++14, header shim) |
+| `config.m4` | Build configuration (pkg-config discovery, C++ standard, header shim) |
 | `php_tango.h` | Extension header |
 | `tango.cpp` | Extension implementation (client `DeviceProxy` + server bridge) |
 | `tango.stub.php` | API stubs for IDEs/static analysis (not loaded at runtime) |
