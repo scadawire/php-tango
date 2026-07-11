@@ -119,7 +119,9 @@ class DeviceProxy
     /**
      * Pull buffered events for a subscription. Each element is
      * ['attr_name'=>string, 'event'=>string, 'err'=>bool, 'value'=>mixed|null,
-     *  'error'=>string?].
+     *  'error'=>string?]. For non-error events carrying a value, the reading's
+     * 'quality'=>int (Tango::AttrQuality) and device timestamp
+     * 'time_sec'=>int, 'time_usec'=>int are included.
      *
      * @return array<int, array>
      * @throws DevFailed

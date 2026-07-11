@@ -878,6 +878,10 @@ PHP_METHOD(DeviceProxy, get_events)
                 deviceattribute_to_zval(*e->attr_value, &val);
                 if (EG(exception)) { zend_clear_exception(); ZVAL_NULL(&val); }
                 add_assoc_zval(&ev, "value", &val);
+                add_assoc_long(&ev, "quality", (long) e->attr_value->get_quality());
+                Tango::TimeVal t = e->attr_value->get_date();
+                add_assoc_long(&ev, "time_sec", (long) t.tv_sec);
+                add_assoc_long(&ev, "time_usec", (long) t.tv_usec);
             } else {
                 add_assoc_null(&ev, "value");
             }
