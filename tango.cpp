@@ -532,6 +532,11 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_event_id, 0, 0, 1)
     ZEND_ARG_TYPE_INFO(0, eventId, IS_LONG, 0)
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_INFO_EX(arginfo_poll_attr, 0, 0, 2)
+    ZEND_ARG_TYPE_INFO(0, attr, IS_STRING, 0)
+    ZEND_ARG_TYPE_INFO(0, periodMs, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
 /* ------------------------------------------------------------------------- */
 /* Tango\DeviceProxy methods                                                 */
 /* ------------------------------------------------------------------------- */
@@ -905,6 +910,71 @@ PHP_METHOD(DeviceProxy, unsubscribe_event)
     } catch (Tango::DevFailed &e) { throw_tango_devfailed(e); RETURN_THROWS(); }
 }
 
+/* poll_attribute(string $attr, int $periodMs): void  -- (re)configure server-side polling */
+PHP_METHOD(DeviceProxy, poll_attribute)
+{
+    char *attr; size_t attr_len; zend_long period;
+    ZEND_PARSE_PARAMETERS_START(2, 2)
+        Z_PARAM_STRING(attr, attr_len)
+        Z_PARAM_LONG(period)
+    ZEND_PARSE_PARAMETERS_END();
+
+    Tango::DeviceProxy *dev = tango_get_proxy(getThis());
+    if (!dev) RETURN_THROWS();
+    try {
+        std::string a(attr, attr_len);
+        dev->poll_attribute(a, (int) period);
+    } catch (Tango::DevFailed &e) { throw_tango_devfailed(e); RETURN_THROWS(); }
+}
+
+/* stop_poll_attribute(string $attr): void */
+PHP_METHOD(DeviceProxy, stop_poll_attribute)
+{
+    char *attr; size_t attr_len;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STRING(attr, attr_len)
+    ZEND_PARSE_PARAMETERS_END();
+
+    Tango::DeviceProxy *dev = tango_get_proxy(getThis());
+    if (!dev) RETURN_THROWS();
+    try {
+        std::string a(attr, attr_len);
+        dev->stop_poll_attribute(a);
+    } catch (Tango::DevFailed &e) { throw_tango_devfailed(e); RETURN_THROWS(); }
+}
+
+/* is_attribute_polled(string $attr): bool */
+PHP_METHOD(DeviceProxy, is_attribute_polled)
+{
+    char *attr; size_t attr_len;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STRING(attr, attr_len)
+    ZEND_PARSE_PARAMETERS_END();
+
+    Tango::DeviceProxy *dev = tango_get_proxy(getThis());
+    if (!dev) RETURN_THROWS();
+    try {
+        std::string a(attr, attr_len);
+        RETURN_BOOL(dev->is_attribute_polled(a) ? 1 : 0);
+    } catch (Tango::DevFailed &e) { throw_tango_devfailed(e); RETURN_THROWS(); }
+}
+
+/* get_attribute_poll_period(string $attr): int  -- polling period in ms, 0 if not polled */
+PHP_METHOD(DeviceProxy, get_attribute_poll_period)
+{
+    char *attr; size_t attr_len;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STRING(attr, attr_len)
+    ZEND_PARSE_PARAMETERS_END();
+
+    Tango::DeviceProxy *dev = tango_get_proxy(getThis());
+    if (!dev) RETURN_THROWS();
+    try {
+        std::string a(attr, attr_len);
+        RETURN_LONG((long) dev->get_attribute_poll_period(a));
+    } catch (Tango::DevFailed &e) { throw_tango_devfailed(e); RETURN_THROWS(); }
+}
+
 /* PyTango-style attribute access: $dev->voltage and $dev->voltage = 5 */
 PHP_METHOD(DeviceProxy, __get)
 {
@@ -962,6 +1032,10 @@ static const zend_function_entry tango_deviceproxy_methods[] = {
     PHP_ME(DeviceProxy, subscribe_event,    arginfo_subscribe,   ZEND_ACC_PUBLIC)
     PHP_ME(DeviceProxy, get_events,         arginfo_event_id,    ZEND_ACC_PUBLIC)
     PHP_ME(DeviceProxy, unsubscribe_event,  arginfo_event_id,    ZEND_ACC_PUBLIC)
+    PHP_ME(DeviceProxy, poll_attribute,     arginfo_poll_attr,   ZEND_ACC_PUBLIC)
+    PHP_ME(DeviceProxy, stop_poll_attribute, arginfo_name_only,  ZEND_ACC_PUBLIC)
+    PHP_ME(DeviceProxy, is_attribute_polled, arginfo_name_only,  ZEND_ACC_PUBLIC)
+    PHP_ME(DeviceProxy, get_attribute_poll_period, arginfo_name_only, ZEND_ACC_PUBLIC)
     PHP_ME(DeviceProxy, __get,              arginfo_get,         ZEND_ACC_PUBLIC)
     PHP_ME(DeviceProxy, __set,              arginfo_set,         ZEND_ACC_PUBLIC)
     PHP_FE_END

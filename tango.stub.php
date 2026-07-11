@@ -131,6 +131,24 @@ class DeviceProxy
     /** Cancel an event subscription. */
     public function unsubscribe_event(int $eventId): void {}
 
+    /**
+     * (Re)configure server-side polling for an attribute at the given period in
+     * milliseconds. Required for PERIODIC_EVENT delivery on attributes that are
+     * not already polled by the device.
+     *
+     * @throws DevFailed
+     */
+    public function poll_attribute(string $attr, int $periodMs): void {}
+
+    /** Stop server-side polling for an attribute. @throws DevFailed */
+    public function stop_poll_attribute(string $attr): void {}
+
+    /** Whether the attribute is currently polled server-side. @throws DevFailed */
+    public function is_attribute_polled(string $attr): bool {}
+
+    /** Current polling period in milliseconds (0 if not polled). @throws DevFailed */
+    public function get_attribute_poll_period(string $attr): int {}
+
     /** PyTango-style attribute read: $dev->attr === $dev->read_attribute("attr"). */
     public function __get(string $name) {}
 
