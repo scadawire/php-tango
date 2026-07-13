@@ -537,6 +537,10 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_poll_attr, 0, 0, 2)
     ZEND_ARG_TYPE_INFO(0, periodMs, IS_LONG, 0)
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_INFO_EX(arginfo_names_array, 0, 0, 1)
+    ZEND_ARG_TYPE_INFO(0, names, IS_ARRAY, 0)
+ZEND_END_ARG_INFO()
+
 /* ------------------------------------------------------------------------- */
 /* Tango\DeviceProxy methods                                                 */
 /* ------------------------------------------------------------------------- */
@@ -648,6 +652,47 @@ PHP_METHOD(DeviceProxy, read_attribute)
         std::string attr_name(name, name_len);
         Tango::DeviceAttribute da = dev->read_attribute(attr_name);
         deviceattribute_to_zval(da, return_value);
+    } catch (Tango::DevFailed &e) { throw_tango_devfailed(e); RETURN_THROWS(); }
+}
+
+/* read_attributes(array $names): array  -- batch read; each element is
+ * ['name'=>string, 'value'=>mixed, 'quality'=>int, 'time_sec'=>int, 'time_usec'=>int]. */
+PHP_METHOD(DeviceProxy, read_attributes)
+{
+    zval *names_arr;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_ARRAY(names_arr)
+    ZEND_PARSE_PARAMETERS_END();
+
+    Tango::DeviceProxy *dev = tango_get_proxy(getThis());
+    if (!dev) RETURN_THROWS();
+    try {
+        std::vector<std::string> names;
+        zval *entry;
+        ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(names_arr), entry) {
+            zend_string *s = zval_get_string(entry);
+            names.push_back(std::string(ZSTR_VAL(s), ZSTR_LEN(s)));
+            zend_string_release(s);
+        } ZEND_HASH_FOREACH_END();
+
+        std::vector<Tango::DeviceAttribute> *das = dev->read_attributes(names);
+        array_init(return_value);
+        for (auto &da : *das) {
+            zval item;
+            array_init(&item);
+            std::string aname = da.get_name();
+            add_assoc_stringl(&item, "name", (char *) aname.c_str(), aname.size());
+            zval val;
+            deviceattribute_to_zval(da, &val);
+            if (EG(exception)) { zend_clear_exception(); ZVAL_NULL(&val); }
+            add_assoc_zval(&item, "value", &val);
+            add_assoc_long(&item, "quality", (long) da.get_quality());
+            Tango::TimeVal t = da.get_date();
+            add_assoc_long(&item, "time_sec", (long) t.tv_sec);
+            add_assoc_long(&item, "time_usec", (long) t.tv_usec);
+            add_next_index_zval(return_value, &item);
+        }
+        delete das;
     } catch (Tango::DevFailed &e) { throw_tango_devfailed(e); RETURN_THROWS(); }
 }
 
@@ -1024,6 +1069,7 @@ static const zend_function_entry tango_deviceproxy_methods[] = {
     PHP_ME(DeviceProxy, get_attribute_list, arginfo_none,        ZEND_ACC_PUBLIC)
     PHP_ME(DeviceProxy, get_command_list,   arginfo_none,        ZEND_ACC_PUBLIC)
     PHP_ME(DeviceProxy, read_attribute,     arginfo_name_only,   ZEND_ACC_PUBLIC)
+    PHP_ME(DeviceProxy, read_attributes,    arginfo_names_array, ZEND_ACC_PUBLIC)
     PHP_ME(DeviceProxy, write_attribute,    arginfo_write_attr,  ZEND_ACC_PUBLIC)
     PHP_ME(DeviceProxy, command_inout,      arginfo_command,     ZEND_ACC_PUBLIC)
     PHP_ME(DeviceProxy, set_timeout_millis, arginfo_set_timeout, ZEND_ACC_PUBLIC)

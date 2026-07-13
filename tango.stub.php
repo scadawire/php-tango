@@ -70,6 +70,16 @@ class DeviceProxy
     public function read_attribute(string $name) {}
 
     /**
+     * Batch-read several attributes in one call. Each element is
+     * ['name'=>string, 'value'=>mixed, 'quality'=>int, 'time_sec'=>int, 'time_usec'=>int].
+     *
+     * @param string[] $names
+     * @return array<int, array>
+     * @throws DevFailed
+     */
+    public function read_attributes(array $names): array {}
+
+    /**
      * Write one attribute. The value is coerced to the attribute's Tango data
      * type (queried from the device). Pass an array for spectrum attributes.
      *
